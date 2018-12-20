@@ -111,7 +111,9 @@ function write_to_data_lines($zabbix_name, $key, $value)
     }
 }
 //-------------------------------------------------------------------------//
-
+function objectToArray($obj) {
+    return json_decode(json_encode($obj), true);
+}
 
 //-------------------------------------------------------------------------//
 // Now starts the heart of mongoDB monitoring !!
@@ -122,8 +124,14 @@ function write_to_data_lines($zabbix_name, $key, $value)
 //-----------------------------
 //print ("Here in mikoomi mongo plugin ... before connecting mongo");
 
-$mongodb_host = empty($options['h']) ? Mongo::DEFAULT_HOST : $options['h'] ;
-$mongodb_port = empty($options['p']) ? Mongo::DEFAULT_PORT : $options['p']  ;
+if (!array_key_exists('h', $options) || !array_key_exists('p', $options)) {
+    echo "The following params are requred:
+   -h    = Hostname or IP address of server running MongoDB
+   -p    = Port number on which to connect to the mongod or mongos process";
+    exit;
+}
+$mongodb_host = $options['h'];
+$mongodb_port = $options['p'];
 
 if ((!empty($options['u'])) && (!empty($options['x']))) {
     $connect_string = $options['u'] . ':' . $options['x'] . '@' . $mongodb_host . ':' . $mongodb_port  ;
@@ -137,26 +145,26 @@ if ($ssl) {
 }
 //print ("Mongo connect string - " . $connect_string);
 #$mongo_connection = new Mongo("mongodb://$connect_string") ;
-$mongo_connection = new MongoClient("mongodb://$connect_string") ;
-
-if (is_null($mongo_connection)) {
-    write_to_log("Error in connection to mongoDB using connect string $connect_string") ;
+try {
+    $mongo_connection = new \MongoDB\Driver\Manager("mongodb://$connect_string");
+    write_to_log("Successfully connected to mongoDB using connect string {$connect_string}") ;
+} catch (\Exception $e) {
+    write_to_log("Error in connection to mongoDB using connect string {$connect_string}. {$e->getMessage()}") ;
     exit ;
-}
-else {
-    write_to_log("Successfully connected to mongoDB using connect string $connect_string") ;
 }
 
 
 //-----------------------------
 // Get server statistics
 //-----------------------------
-$mongo_db_handle = $mongo_connection->selectDB("admin") ;
-
-$server_status = $mongo_db_handle->command(array('serverStatus'=>1)) ;
-
+try {
+    $server_status = current($mongo_connection->executeCommand('admin', new MongoDB\Driver\Command(['serverStatus' => 1]))->toArray());
+    $server_status = objectToArray($server_status);
+} catch (\Exception $e) {
+    $server_status = [];
+}
 if (!isset($server_status['ok'])) {
-    write_to_log("Error in executing $command.") ;
+    write_to_log('Error in executing "new MongoDB\Driver\Command([serverStatus => 1])".') ;
     exit ;
 }
 
@@ -345,9 +353,14 @@ write_to_data_lines($zabbix_name, "logging.datafile_write_time_ms", $logging_dat
 //-----------------------------
 // Get DB list and cumulative DB info
 //-----------------------------
-$db_list = $mongo_connection->listDBs() ;
-
-$db_count = count($db_list) ;
+try {
+    $db_list = current($mongo_connection->executeCommand("admin", new MongoDB\Driver\Command(["listDatabases" => 1]))->toArray());
+    $db_list = objectToArray($db_list);
+} catch (\Exception $e) {
+    write_to_log('Error in executing "new MongoDB\Driver\Command([listDatabases => 1])".') ;
+    exit;
+}
+$db_count = count($db_list['databases']) ;
 write_to_data_lines($zabbix_name, "db.count", $db_count) ;
 
 $totalSize = round(($db_list['totalSize'])/(1024*1024), 2) ;
@@ -381,9 +394,13 @@ foreach($db_list['databases'] as $db) {
        // Do nothing !
     }
 
-    $mongo_db_handle = $mongo_connection->selectDB($db['name']) ;
-    $db_stats = $mongo_db_handle->command(array('dbStats'=>1)) ;
-
+    try {
+        $db_stats = current($mongo_connection->executeCommand($db['name'], new MongoDB\Driver\Command(['dbStats' => 1]))->toArray());
+        $db_stats = objectToArray($db_stats);
+    } catch (\Exception $e) {
+        write_to_log('Error in executing "new MongoDB\Driver\Command([dbStats => 1])".') ;
+        exit;
+    }
     $execute_status = $db_stats['ok'] ;
 
     if ($execute_status == 0) {
@@ -438,13 +455,10 @@ foreach($db_info_collections as $name => $dummy) {
 // Check for replication / replicaSets
 //-----------------------------
 if ($is_sharded == 'No') {
-   $mongo_db_handle = $mongo_connection->selectDB('admin') ;
-   $rs_status = $mongo_db_handle->command(array('replSetGetStatus'=>1)) ;
+    try {
+        $rs_status = current($mongo_connection->executeCommand('admin', new MongoDB\Driver\Command(array('replSetGetStatus'=>1)))->toArray());
+        $rs_status = json_decode(json_encode($rs_status), true);
 
-   if (!($rs_status['ok'])) {
-       write_to_data_lines($zabbix_name, "is_replica_set",  "No") ;
-   }
-   else {
        write_to_data_lines($zabbix_name, "is_replica_set", "Yes") ;
        write_to_data_lines($zabbix_name, "replica_set_name", $rs_status['set']) ;
        write_to_data_lines($zabbix_name, "replica_set_member_count", count($rs_status['members']) )  ;
@@ -455,11 +469,13 @@ if ($is_sharded == 'No') {
        }
        write_to_data_lines($zabbix_name, "replica_set_hosts", $repl_set_member_names)  ;
 
-       $local_mongo_db_handle = $mongo_connection->selectDB('local') ;
-       $col_name = 'oplog.rs' ;
-       $mongo_collection = $local_mongo_db_handle->$col_name ;
-       $oplog_rs_count = $mongo_collection->count() ;
-       write_to_data_lines($zabbix_name, "oplog.rs_count", $oplog_rs_count)  ;
+        try {
+            $oplog_rs_count = current($mongo_connection->executeCommand('local', new MongoDB\Driver\Command(['count' => 'oplog.rs']))->toArray());
+            write_to_data_lines($zabbix_name, "oplog.rs_count", $oplog_rs_count->n);
+        } catch (\Exception $e) {
+            write_to_log('Error in executing "new MongoDB\Driver\Command([count => oplog.rs])".') ;
+            exit;
+        }
 
        //$rs_status = $mongo_db_handle->execute("$command") ;
        $repl_member_attention_state_count = 0 ;
@@ -524,66 +540,16 @@ if ($is_sharded == 'No') {
        }
        write_to_data_lines($zabbix_name, "repl_member_attention_state_count", $repl_member_attention_state_count) ;
        write_to_data_lines($zabbix_name, "repl_member_attention_state_info", ($repl_member_attention_state_count > 0 ? $repl_member_attention_state_info : 'empty') ) ;
-   }
+    } catch (\MongoDB\Driver\Exception\CommandException $e) {
+        write_to_data_lines($zabbix_name, "is_replica_set",  "No") ;
+    }
 
 }
 
 //-----------------------------
 // Check for sharding
 //-----------------------------
-if ($is_sharded == 'Yes') {
-    $mongo_db_handle = $mongo_connection->selectDB('config') ;
-
-    $mongo_collection = $mongo_db_handle->chunks ;
-    $shard_info = $mongo_collection->count() ;
-    write_to_data_lines($zabbix_name, "shard_chunk_count", $shard_info) ;
-
-    $mongo_collection = $mongo_db_handle->collections ;
-    $shard_info = $mongo_collection->count() ;
-    write_to_data_lines($zabbix_name, "sharded_collections_count", $shard_info) ;
-
-    $collection = $mongo_connection->selectDB('config')->selectCollection('collections') ;
-    $cursor = $collection->find() ;
-    $collection_array = iterator_to_array($cursor) ;
-    $collection_info = '' ;
-    foreach ($collection_array as $shard) {
-        $collection_info .= $shard['_id'] . ' || ' ;
-    }
-    write_to_data_lines($zabbix_name, "sharded_collection_info", $collection_info) ;
-
-
-    $command = "db.shards.count" ;
-    $mongo_collection = $mongo_db_handle->shards ;
-    $shard_info = $mongo_collection->count() ;
-    write_to_data_lines($zabbix_name, "shard_count", $shard_info) ;
-
-    $collection = $mongo_connection->selectDB('config')->selectCollection('shards') ;
-    $cursor = $collection->find() ;
-    $shards_array = iterator_to_array($cursor) ;
-    $shard_info = '' ;
-    foreach ($shards_array as $shard) {
-        $shard_info .= $shard['_id'] . ' = ' . $shard['host'] . ' || ' ;
-    }
-    write_to_data_lines($zabbix_name, "shard_info", $shard_info) ;
-
-    $collection = $mongo_connection->selectDB('config')->selectCollection('databases') ;
-    $cursor = $collection->find() ;
-    $db_array = iterator_to_array($cursor) ;
-    $db_info = '' ;
-    foreach ($db_array as $db) {
-        if( $db['partitioned'] ) {
-            $partitioned = 'yes' ;
-        }
-        else {
-            $partitioned = 'no' ;
-        }
-        $db_info .= $db['_id'] . ' : ' . 'partitioned = ' . $partitioned . ', primary = ' . $db['primary'] . ' || ' ;
-    }
-    write_to_data_lines($zabbix_name, "db_info", $db_info) ;
-
-
-}
-
+// REMOVED.
 //-------------------------------------------------------------------------//
 
 
@@ -626,4 +592,3 @@ if (is_resource($process)) {
 exit ;
 
 ?>
-
