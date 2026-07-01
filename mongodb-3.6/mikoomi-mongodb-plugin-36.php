@@ -463,6 +463,23 @@ if ($is_sharded == 'No') {
        write_to_data_lines($zabbix_name, "replica_set_name", $rs_status['set']) ;
        write_to_data_lines($zabbix_name, "replica_set_member_count", count($rs_status['members']) )  ;
 
+       try {
+           $rs_config = current($mongo_connection->executeCommand('admin', new MongoDB\Driver\Command(array('replSetGetConfig'=>1)))->toArray());
+           $rs_config = objectToArray($rs_config);
+
+           if (isset($rs_config['config']['members'])) {
+               $replica_set_votes_count = 0;
+               foreach ($rs_config['config']['members'] as $rs_config_member) {
+                   $replica_set_votes_count += isset($rs_config_member['votes']) ? intval($rs_config_member['votes']) : 1;
+               }
+
+               write_to_data_lines($zabbix_name, "replica_set_votes_count", $replica_set_votes_count) ;
+               write_to_data_lines($zabbix_name, "replica_set_votes_even", ($replica_set_votes_count % 2 == 0 ? 1 : 0)) ;
+           }
+       } catch (\Exception $e) {
+           write_to_log('Error in executing "new MongoDB\Driver\Command([replSetGetConfig => 1])".') ;
+       }
+
        $repl_set_member_names = '' ;
        foreach ($rs_status['members'] as $repl_set_member) {
            $repl_set_member_names .= 'host#' . $repl_set_member['_id'] . ' = ' . $repl_set_member['name'] . ' || ' ;
